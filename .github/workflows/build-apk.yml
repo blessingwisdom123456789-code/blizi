@@ -75,12 +75,31 @@ jobs:
           fi
           test -f "$WEBDIR/index.html"
 
+      - name: Pin WebView origin to the backend allowed origin
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "capacitor.config.json";
+            const c = JSON.parse(fs.readFileSync(p, "utf8"));
+            c.server = Object.assign({}, c.server, {
+              hostname: "blizi-5wmngeff.manus.space",
+              androidScheme: "https"
+            });
+            fs.writeFileSync(p, JSON.stringify(c, null, 2));
+            console.log("--- capacitor.config.json ---");
+            console.log(fs.readFileSync(p, "utf8"));
+          '
+          sed -i 's|backendUrl: "[^"]*"|backendUrl: "https://blizi-5wmngeff.manus.space/chat"|' frontend/config.js
+          grep -n 'backendUrl' frontend/config.js
+          grep -q 'blizi-5wmngeff.manus.space/chat' frontend/config.js
+
       - name: Generate Capacitor Android project
         run: |
           rm -rf android
           npx cap add android
           test -f android/gradlew
           test -f android/app/src/main/AndroidManifest.xml
+          node -e 'const c=require("./android/app/src/main/assets/capacitor.config.json"); console.log("generated server:", JSON.stringify(c.server));'
 
       - name: Remove generated MainActivity.java
         run: |
@@ -141,6 +160,7 @@ jobs:
           test -f "$APK"
           AAPT2="$ANDROID_HOME/build-tools/34.0.0/aapt2"
           "$AAPT2" dump badging "$APK" | grep -E "^package:|launchable-activity"
+          unzip -p "$APK" assets/public/config.js | grep -o 'backendUrl: "[^"]*"'
           ls -l "$APK"
 
       - uses: actions/upload-artifact@v4
