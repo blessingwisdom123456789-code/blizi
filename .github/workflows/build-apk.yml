@@ -17,10 +17,21 @@ jobs:
 
       - name: Unpack project zip
         run: |
-          set -- ./*.zip
-          echo "found: $*"
-          unzip -q -o "blizi-source-updated.zip"
+          set -euo pipefail
+          zipfile=$(ls -1 ./*.zip | head -n1)
+          echo "using archive: $zipfile"
+          unzip -q -o "$zipfile"
           rm -f ./*.zip
+          if [ ! -f package.json ]; then
+            inner=$(find . -maxdepth 2 -name package.json -not -path './node_modules/*' | head -n1)
+            test -n "$inner" || { echo "::error::no package.json after unpack"; exit 1; }
+            inner=$(dirname "$inner")
+            echo "flattening $inner"
+            cp -a "$inner"/. .
+            rm -rf "$inner"
+          fi
+          test -f package.json
+          ls -a | head -40
 
       - uses: actions/setup-node@v4
         with:
