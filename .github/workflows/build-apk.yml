@@ -33,6 +33,14 @@ jobs:
           test -f package.json
           ls -a | head -40
 
+      - name: Fix GestureResultCallback reference
+        run: |
+          set -euo pipefail
+          f=$(find . -name AgentAccessibilityService.kt -not -path './android/*' | head -n1)
+          echo "patching $f"
+          sed -i 's/android\.accessibilityservice\.GestureResultCallback/GestureResultCallback/g' "$f"
+          grep -n 'GestureResultCallback' "$f"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 18
