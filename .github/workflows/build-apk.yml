@@ -1,0 +1,132 @@
+name: Build Blizi APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project zip
+        run: |
+          set -- ./*.zip
+          echo "found: $*"
+          unzip -q -o "blizi-source-updated.zip"
+          rm -f ./*.zip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0"
+
+      - name: Run unit tests
+        continue-on-error: true
+        run: npm test
+
+      - name: Install Capacitor 6
+        run: npm install --no-save @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+
+      - name: Check config and web assets
+        run: |
+          node -e '
+            const c = require("./capacitor.config.json");
+            if (c.appId !== "com.blizi.ai") { console.error("appId must be com.blizi.ai, got " + c.appId); process.exit(1); }
+            console.log("webDir=" + c.webDir);
+          '
+          WEBDIR=$(node -p 'require("./capacitor.config.json").webDir')
+          if [ ! -f "$WEBDIR/index.html" ]; then
+            test -f frontend/index.html || { echo "::error::no $WEBDIR/index.html and no frontend/index.html"; exit 1; }
+            rm -rf "$WEBDIR" && cp -r frontend "$WEBDIR"
+          fi
+          test -f "$WEBDIR/index.html"
+
+      - name: Generate Capacitor Android project
+        run: |
+          rm -rf android
+          npx cap add android
+          test -f android/gradlew
+          test -f android/app/src/main/AndroidManifest.xml
+
+      - name: Remove generated MainActivity.java
+        run: |
+          find android/app/src/main -name MainActivity.java -print -delete
+          test -z "$(find android/app/src/main -name MainActivity.java)"
+
+      - name: Copy native overlay
+        run: |
+          test -d native-overlay
+          mkdir -p android/app/src/main/kotlin android/app/src/main/res
+          cp -R native-overlay/kotlin/. android/app/src/main/kotlin/
+          cp -R native-overlay/res/.    android/app/src/main/res/
+
+      - name: Merge manifest additions
+        run: |
+          python3 - <<'PY'
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p).read()
+          top = open("native-overlay/manifest-top.xml").read()
+          svc = open("native-overlay/manifest-services.xml").read()
+          assert "<application" in s and "</application>" in s, "unexpected generated manifest"
+          assert "AgentAccessibilityService" not in s, "manifest already merged"
+          s = s.replace("<application", top + "\n    <application", 1)
+          s = s.replace("</application>", svc + "\n    </application>", 1)
+          open(p, "w").write(s)
+          PY
+          grep -c AgentAccessibilityService android/app/src/main/AndroidManifest.xml
+
+      - name: Enable Kotlin in the generated Gradle project
+        run: |
+          python3 - <<'PY'
+          import re
+          root = "android/build.gradle"
+          s = open(root).read()
+          s2, n = re.subn(r"(classpath\s+['\"]com\.android\.tools\.build:gradle:[^'\"]+['\"])",
+                          r"\1\n        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22'", s, count=1)
+          assert n == 1, "could not find the AGP classpath line in android/build.gradle"
+          open(root, "w").write(s2)
+
+          app = "android/app/build.gradle"
+          a = open(app).read()
+          a, n1 = re.subn(r"(apply plugin:\s*['\"]com\.android\.application['\"])", r"\1\napply plugin: 'kotlin-android'", a, count=1)
+          a, n2 = re.subn(r"(\nandroid\s*\{)", r"\1\n    kotlinOptions { jvmTarget = '17' }\n    sourceSets { main.java.srcDirs += 'src/main/kotlin' }", a, count=1)
+          a, n3 = re.subn(r"(\ndependencies\s*\{)", r"\1\n    implementation 'androidx.core:core:1.12.0'", a, count=1)
+          assert (n1, n2, n3) == (1, 1, 1), "build.gradle patch failed: %s" % ((n1, n2, n3),)
+          open(app, "w").write(a)
+          PY
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Verify APK contents
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          AAPT2="$ANDROID_HOME/build-tools/34.0.0/aapt2"
+          "$AAPT2" dump badging "$APK" | grep -E "^package:|launchable-activity"
+          ls -l "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blizi-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
